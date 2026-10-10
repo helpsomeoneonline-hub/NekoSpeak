@@ -1,6 +1,6 @@
 <resources>
     <!-- App Information -->
-    <string name="app_name">NekoSpeak</string>
+    <string name="app_name">NekoSpeak Voiceover</string>
     <string name="app_description">Cat-powered offline text-to-speech with Kokoro and Kitten TTS</string>
     
     <string name="tts_default_lang">eng</string>
