@@ -28,10 +28,11 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Install Android SDK components
-        run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "cmake;3.22.1"
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # Override the obsolete default tools package.
+          packages: 'platform-tools platforms;android-35 build-tools;35.0.0 cmake;3.22.1'
 
       - name: Set standalone APK identity
         shell: bash
