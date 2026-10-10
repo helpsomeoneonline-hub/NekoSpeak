@@ -155,7 +155,7 @@ class PreviewAudioCapture(context: Context) {
     }
 
     private companion object {
-        const val WAV_HEADER_SIZE = 44L
+        const val WAV_HEADER_SIZE = 44
         // 4 GB WAV RIFF file limit; avoid overflow in signed Int arithmetic.
         const val MAX_PCM_BYTES = 0x7ffffff0L
     }
