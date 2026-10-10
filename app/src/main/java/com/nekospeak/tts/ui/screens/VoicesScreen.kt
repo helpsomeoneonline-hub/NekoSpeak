@@ -1,6 +1,18 @@
 package com.nekospeak.tts.ui.screens
 
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
+import com.nekospeak.tts.utils.PreviewAudioCapture
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.util.UUID
+import java.text.SimpleDateFormat
+import java.util.Date
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -40,6 +52,91 @@ fun VoicesScreen(
     val prefs = remember { PrefsManager(context) }
     val snackbarHostState = remember { SnackbarHostState() }
     
+    // A finished preview is stored once, then reused for saving and sharing.
+    val audioCapture = remember(context) { PreviewAudioCapture(context) }
+    var lastAudioFile by remember { mutableStateOf(audioCapture.lastCompleted()) }
+    var activePreviewId by remember { mutableStateOf<String?>(null) }
+    var pendingSaveFile by remember { mutableStateOf<File?>(null) }
+
+    val saveWavLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("audio/wav")
+    ) { destination ->
+        val source = pendingSaveFile
+        pendingSaveFile = null
+        if (destination != null && source?.isFile == true) {
+            scope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    runCatching {
+                        context.contentResolver.openOutputStream(destination, "w")?.use { output ->
+                            source.inputStream().use { it.copyTo(output) }
+                        } ?: error("Could not open the selected destination")
+                    }
+                }
+                snackbarHostState.showSnackbar(
+                    if (result.isSuccess) "WAV saved successfully" else
+                        "Save failed: ${result.exceptionOrNull()?.message ?: "unknown error"}"
+                )
+            }
+        }
+    }
+
+    val audioListener = remember(audioCapture, scope) {
+        object : UtteranceProgressListener() {
+            override fun onStart(utteranceId: String) = Unit
+
+            override fun onBeginSynthesis(
+                utteranceId: String, sampleRateInHz: Int,
+                audioFormat: Int, channelCount: Int
+            ) {
+                audioCapture.begin(utteranceId, sampleRateInHz, audioFormat, channelCount)
+            }
+
+            override fun onAudioAvailable(utteranceId: String, audio: ByteArray) {
+                audioCapture.addAudio(utteranceId, audio)
+            }
+
+            override fun onDone(utteranceId: String) {
+                val file = audioCapture.finish(utteranceId)
+                scope.launch {
+                    if (activePreviewId == utteranceId) {
+                        activePreviewId = null
+                        if (file != null) {
+                            lastAudioFile = file
+                        } else {
+                            snackbarHostState.showSnackbar("Audio played but could not be saved")
+                        }
+                    }
+                }
+            }
+
+            @Deprecated("The Android framework still calls this for older engines")
+            override fun onError(utteranceId: String) {
+                failed(utteranceId)
+            }
+
+            override fun onError(utteranceId: String, errorCode: Int) {
+                failed(utteranceId)
+            }
+
+            override fun onStop(utteranceId: String, interrupted: Boolean) {
+                audioCapture.abort(utteranceId)
+                scope.launch {
+                    if (activePreviewId == utteranceId) activePreviewId = null
+                }
+            }
+
+            private fun failed(utteranceId: String) {
+                audioCapture.abort(utteranceId)
+                scope.launch {
+                    if (activePreviewId == utteranceId) {
+                        activePreviewId = null
+                        snackbarHostState.showSnackbar("Speech synthesis failed")
+                    }
+                }
+            }
+        }
+    }
+
     // Test Speech State
     var testText by remember { mutableStateOf("Hello, I am NekoSpeak.") }
     var speechRate by remember { mutableFloatStateOf(1.0f) }
@@ -58,13 +155,10 @@ fun VoicesScreen(
     var isCloning by remember { mutableStateOf(false) }
     
     DisposableEffect(Unit) {
-        // Explicitly use our own engine package to ensure we test NekoSpeak
-        // regardless of the system-wide default setting.
-        tts = TextToSpeech(context, { status ->
-             if (status == TextToSpeech.SUCCESS) {
-                 // Init
-             }
-        }, "com.nekospeak.tts")
+        // Bind to this fork's own TTS service, not the user's default engine.
+        tts = TextToSpeech(context, { _ -> }, context.packageName).also {
+            it.setOnUtteranceProgressListener(audioListener)
+        }
         onDispose {
             tts?.shutdown()
         }
@@ -156,53 +250,122 @@ fun VoicesScreen(
             }
         },
         bottomBar = {
-            // Test Speech Bar
-            Surface(
-                tonalElevation = 8.dp,
-                shadowElevation = 8.dp
-            ) {
-                Row(
+            Surface(tonalElevation = 8.dp, shadowElevation = 8.dp) {
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp)
                         .navigationBarsPadding()
-                        .imePadding(),
-                    verticalAlignment = Alignment.CenterVertically
+                        .imePadding()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    OutlinedTextField(
-                        value = testText,
-                        onValueChange = { testText = it },
-                        modifier = Modifier.weight(1f),
-                        placeholder = { Text("Type to speak...") },
-                        singleLine = true,
-                        shape = RoundedCornerShape(12.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    FloatingActionButton(
-                        onClick = {
-                             val voiceId = uiState.selectedVoiceId ?: prefs.currentVoice
-                             val params = android.os.Bundle()
-                             params.putString("voiceName", voiceId)
-                             
-                             // Graceful recovery: stop, and if isSpeaking was true after stop, recreate TTS
-                             val wasSpeaking = tts?.isSpeaking == true
-                             tts?.stop()
-                             
-                             // If TTS was stuck or in an error state, recreate it
-                             if (wasSpeaking) {
-                                 // Give a brief moment for stop to take effect
-                                 tts?.shutdown()
-                                 tts = TextToSpeech(context, { _ -> }, "com.nekospeak.tts")
-                             }
-                             
-                             // Set the speech rate from preferences
-                             tts?.setSpeechRate(prefs.speechSpeed)
-                             
-                             tts?.speak(testText, TextToSpeech.QUEUE_FLUSH, params, "test_id")
-                        },
-                        containerColor = MaterialTheme.colorScheme.primary
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.PlayArrow, "Speak")
+                        OutlinedTextField(
+                            value = testText,
+                            onValueChange = { testText = it },
+                            modifier = Modifier.weight(1f),
+                            placeholder = { Text("Type your voiceover...") },
+                            maxLines = 3,
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        FloatingActionButton(
+                            onClick = {
+                                if (testText.isNotBlank()) {
+                                    val voiceId = uiState.selectedVoiceId ?: prefs.currentVoice
+                                    val params = android.os.Bundle().apply {
+                                        putString("voiceName", voiceId)
+                                    }
+                                    // Stop previous playback, then capture this unique preview.
+                                    val wasSpeaking = tts?.isSpeaking == true
+                                    tts?.stop()
+                                    if (wasSpeaking) {
+                                        tts?.shutdown()
+                                        tts = TextToSpeech(context, { _ -> }, context.packageName).also {
+                                            it.setOnUtteranceProgressListener(audioListener)
+                                        }
+                                    }
+                                    val id = "preview_${UUID.randomUUID()}"
+                                    audioCapture.arm(id)
+                                    activePreviewId = id
+                                    tts?.setSpeechRate(prefs.speechSpeed)
+                                    val queued = tts?.speak(
+                                        testText, TextToSpeech.QUEUE_FLUSH, params, id
+                                    )
+                                    if (queued != TextToSpeech.SUCCESS) {
+                                        audioCapture.abort(id)
+                                        activePreviewId = null
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar("Could not start speech. Try Play again.")
+                                        }
+                                    }
+                                }
+                            },
+                            containerColor = MaterialTheme.colorScheme.primary
+                        ) {
+                            Icon(Icons.Default.PlayArrow, "Generate and play voiceover")
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            enabled = lastAudioFile?.isFile == true && activePreviewId == null,
+                            onClick = {
+                                pendingSaveFile = lastAudioFile
+                                val name = SimpleDateFormat(
+                                    "yyyyMMdd_HHmmss", Locale.US
+                                ).format(Date())
+                                saveWavLauncher.launch("NekoSpeak_voiceover_${name}.wav")
+                            }
+                        ) {
+                            Text("Save WAV")
+                        }
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            enabled = lastAudioFile?.isFile == true && activePreviewId == null,
+                            onClick = {
+                                lastAudioFile?.let { file ->
+                                    runCatching {
+                                        val uri = FileProvider.getUriForFile(
+                                            context,
+                                            "${context.packageName}.fileprovider",
+                                            file
+                                        )
+                                        val share = Intent(Intent.ACTION_SEND).apply {
+                                            type = "audio/wav"
+                                            putExtra(Intent.EXTRA_STREAM, uri)
+                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        }
+                                        context.startActivity(
+                                            Intent.createChooser(share, "Share voiceover")
+                                        )
+                                    }.onFailure {
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar(
+                                                "Could not share: ${it.message ?: "unknown error"}"
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        ) {
+                            Text("Share")
+                        }
+                    }
+                    if (activePreviewId != null) {
+                        Text("Generating voiceover…", style = MaterialTheme.typography.labelSmall)
+                    } else if (lastAudioFile?.isFile == true) {
+                        Text(
+                            "Last completed preview ready to save or share",
+                            style = MaterialTheme.typography.labelSmall
+                        )
                     }
                 }
             }

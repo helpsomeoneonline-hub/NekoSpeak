@@ -3,4 +3,7 @@
     <cache-path
         name="support_reports"
         path="support_reports/" />
+    <files-path
+        name="voiceover_exports"
+        path="voiceovers/" />
 </paths>
