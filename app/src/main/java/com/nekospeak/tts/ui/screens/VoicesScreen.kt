@@ -325,8 +325,6 @@ fun VoicesScreen(
                                 saveWavLauncher.launch("NekoSpeak_voiceover_${name}.wav")
                             }
                         ) {
-                            Icon(Icons.Default.Download, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(5.dp))
                             Text("Save WAV")
                         }
                         OutlinedButton(
@@ -358,8 +356,6 @@ fun VoicesScreen(
                                 }
                             }
                         ) {
-                            Icon(Icons.Default.Share, null, Modifier.size(18.dp))
-                            Spacer(Modifier.width(5.dp))
                             Text("Share")
                         }
                     }
